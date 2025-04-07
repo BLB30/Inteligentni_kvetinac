@@ -1,0 +1,187 @@
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
+
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+#define ONE_WIRE_BUS 2
+OneWire oneWire(ONE_WIRE_BUS);
+DallasTemperature sensors(&oneWire);
+
+int soilAnalogPin = A0;
+#define LED_PIN 4
+#define RELAY_WATER_PIN 8
+#define BUTTON_UP_PIN 10
+#define BUTTON_DOWN_PIN 12
+
+const int minProfil = 1;
+const int maxProfil = 6;
+int profil = 1;
+
+unsigned long posledniCasMereniTeploty = 0;
+const unsigned long intervalMereniTeploty = 15000;
+float teplota = 0.0;
+bool chybaTeploty = false;
+
+int nastaveni[5][3] = {
+  {20, 22, 30},
+  {20, 22, 30},
+  {20, 22, 30},
+  {20, 22, 30},
+  {20, 22, 30},
+};
+
+enum Stav { NORMAL, UPRAVA_MIN, UPRAVA_MAX, UPRAVA_VLHKOST };
+Stav stav = NORMAL;
+int tempUprava = 0;
+
+void setup() {
+  Serial.begin(9600);
+  sensors.begin();
+  lcd.init();
+  lcd.backlight();
+
+  pinMode(LED_PIN, OUTPUT);
+  pinMode(RELAY_WATER_PIN, OUTPUT);
+  digitalWrite(RELAY_WATER_PIN, LOW);
+  digitalWrite(LED_PIN, LOW);
+
+  pinMode(BUTTON_UP_PIN, INPUT);
+  pinMode(BUTTON_DOWN_PIN, INPUT);
+
+  lcd.print("Senzory OK");
+  delay(2000);
+  lcd.clear();
+  mereniTeploty();
+}
+
+void mereniTeploty() {
+  sensors.requestTemperatures();
+  teplota = sensors.getTempCByIndex(0);
+  chybaTeploty = (teplota == -127.0);
+}
+
+void loop() {
+  unsigned long aktualniCas = millis();
+  if (aktualniCas - posledniCasMereniTeploty >= intervalMereniTeploty) {
+    mereniTeploty();
+    posledniCasMereniTeploty = aktualniCas;
+  }
+
+  static bool lastUpState = LOW;
+  static bool lastDownState = LOW;
+
+  bool currentUpState = digitalRead(BUTTON_UP_PIN);
+  bool currentDownState = digitalRead(BUTTON_DOWN_PIN);
+
+  int vlhkostAnalog = analogRead(soilAnalogPin);
+  int vlhkostProcenta = map(vlhkostAnalog, 1023, 0, 0, 100);
+
+  switch (stav) {
+    case NORMAL:
+      if (currentDownState == HIGH && lastDownState == LOW) {
+        profil++;
+        if (profil > maxProfil) profil = minProfil;
+      }
+
+      if (currentUpState == HIGH && lastUpState == LOW) {
+        if (profil == 6) {
+          digitalWrite(RELAY_WATER_PIN, LOW);
+        } else {
+          stav = UPRAVA_MIN;
+          tempUprava = 0;
+        }
+      }
+      break;
+
+    case UPRAVA_MIN:
+      lcd.setCursor(0, 0);
+      lcd.print("Min teplota: ");
+      lcd.print(tempUprava);
+      lcd.print("   ");
+      if (currentDownState == HIGH && lastDownState == LOW) {
+        if (tempUprava < 39) tempUprava++;
+      }
+      if (currentUpState == HIGH && lastUpState == LOW) {
+        nastaveni[profil - 1][0] = tempUprava;
+        tempUprava = nastaveni[profil - 1][1];
+        stav = UPRAVA_MAX;
+      }
+      break;
+
+    case UPRAVA_MAX:
+      lcd.setCursor(0, 0);
+      lcd.print("Max teplota: ");
+      lcd.print(tempUprava);
+      lcd.print("   ");
+      if (currentDownState == HIGH && lastDownState == LOW) {
+        if (tempUprava < 40) tempUprava++;
+      }
+      if (currentUpState == HIGH && lastUpState == LOW) {
+        nastaveni[profil - 1][1] = tempUprava;
+        tempUprava = nastaveni[profil - 1][2];
+        stav = UPRAVA_VLHKOST;
+      }
+      break;
+
+    case UPRAVA_VLHKOST:
+      lcd.setCursor(0, 0);
+      lcd.print("Vlhkost ON < ");
+      lcd.print(tempUprava);
+      lcd.print("%   ");
+      if (currentDownState == HIGH && lastDownState == LOW) {
+        if (tempUprava < 100) tempUprava++;
+      }
+      if (currentUpState == HIGH && lastUpState == LOW) {
+        nastaveni[profil - 1][2] = tempUprava;
+        stav = NORMAL;
+      }
+      break;
+  }
+
+  if (stav == NORMAL && profil != 6) {
+    int minT = nastaveni[profil - 1][0];
+    int maxT = nastaveni[profil - 1][1];
+    int vlhLimit = nastaveni[profil - 1][2];
+
+    if (!chybaTeploty && (teplota > maxT || teplota < minT)) {
+      digitalWrite(LED_PIN, HIGH);
+    } else {
+      digitalWrite(LED_PIN, LOW);
+    }
+
+    if (vlhkostProcenta < vlhLimit) {
+      digitalWrite(RELAY_WATER_PIN, LOW);
+    } else {
+      digitalWrite(RELAY_WATER_PIN, HIGH);
+    }
+  }
+
+  if (stav == NORMAL) {
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("T:");
+    if (!chybaTeploty) {
+      lcd.print(teplota);
+      lcd.print("C ");
+    } else {
+      lcd.print("---CHYBA--- ");
+    }
+
+    lcd.setCursor(0, 1);
+    lcd.print("Vlhkost:");
+    lcd.print(vlhkostProcenta);
+    lcd.print("% ");
+    lcd.setCursor(13, 1);
+    if (profil == 6) {
+      lcd.print("M");
+    } else {
+      lcd.print(profil);
+    }
+  }
+
+  lastUpState = currentUpState;
+  lastDownState = currentDownState;
+  delay(100);
+}
